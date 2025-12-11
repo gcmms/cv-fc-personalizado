@@ -2,19 +2,22 @@
 import { ref } from "vue";
 import html2canvas from "html2canvas";
 import { jsPDF } from "jspdf";
+import * as pdfjsLib from "pdfjs-dist";
 
-const linkUrl = ref("");
-const token = ref("");
+pdfjsLib.GlobalWorkerOptions.workerSrc = `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/${pdfjsLib.version}/pdf.worker.min.js`;
+
 const loading = ref(false);
 const generating = ref(false);
 const statusMessage = ref("");
 const isError = ref(false);
-const bookmark = ref(null);
+const profile = ref(null);
 const previewRef = ref(null);
+const uploadedFileName = ref("");
 
 const defaultSections = () => [
-  { title: "Contexto", body: "Preencha o contexto do link aqui." },
-  { title: "Insights", body: "Liste os principais pontos coletados." }
+  { title: "Resumo do perfil", body: "Edite o resumo extraído ou adapte ao contexto FCamara." },
+  { title: "Experiência", body: "Liste experiências relevantes, desafios e resultados." },
+  { title: "Competências", body: "Habilidades técnicas e comportamentais observadas." }
 ];
 
 const sections = ref(defaultSections());
@@ -26,55 +29,69 @@ const formatDate = (date) =>
   }).format(date);
 
 const resetData = () => {
-  bookmark.value = null;
-  linkUrl.value = "";
-  token.value = "";
+  profile.value = null;
+  uploadedFileName.value = "";
   sections.value = defaultSections();
   statusMessage.value = "";
   isError.value = false;
 };
 
-const stripHtml = (html) => {
-  const div = document.createElement("div");
-  div.innerHTML = html;
-  return div.textContent || div.innerText || "";
+const extractTextFromPdf = async (arrayBuffer) => {
+  const doc = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+  const maxPages = Math.min(doc.numPages, 3); // limita leitura para performance
+  let fullText = "";
+  for (let i = 1; i <= maxPages; i++) {
+    const page = await doc.getPage(i);
+    const content = await page.getTextContent();
+    const strings = content.items.map((it) => it.str).filter(Boolean);
+    fullText += strings.join(" ") + "\n";
+  }
+  return fullText;
 };
 
-const fetchBookmark = async () => {
-  if (!linkUrl.value) {
-    statusMessage.value = "Informe a URL do Linkding.";
+const parseProfileText = (text) => {
+  const lines = text
+    .split(/\n|•|-|\u2022/g)
+    .map((l) => l.trim())
+    .filter((l) => l.length > 0);
+
+  const name = lines[0] || "Nome não identificado";
+  const headline = lines[1] || "Headline não identificada";
+  const summaryText = lines.slice(2).join(" ");
+  return {
+    name,
+    headline,
+    summary: summaryText || "Resumo não identificado.",
+    raw: text
+  };
+};
+
+const handleFile = async (evt) => {
+  const file = evt.target.files?.[0];
+  if (!file) return;
+  if (file.type !== "application/pdf") {
+    statusMessage.value = "Envie um PDF.";
     isError.value = true;
     return;
   }
   loading.value = true;
   isError.value = false;
-  statusMessage.value = "Buscando...";
+  statusMessage.value = "Lendo PDF...";
   try {
-    const headers = { Accept: "application/json, text/plain, */*" };
-    if (token.value.trim()) headers.Authorization = `Token ${token.value.trim()}`;
-    const response = await fetch(linkUrl.value, { headers });
-    if (!response.ok) throw new Error(`Erro ${response.status} ao buscar dados`);
-    const contentType = response.headers.get("content-type") || "";
-    let data;
-    if (contentType.includes("application/json")) {
-      data = await response.json();
-    } else {
-      const text = await response.text();
-      data = { title: "Link", url: linkUrl.value, description: text.slice(0, 300) + "..." };
-    }
-    const tags = data.tag_names || data.tags || [];
-    bookmark.value = {
-      title: data.title || data.url || "Sem título",
-      url: data.url || linkUrl.value,
-      description: data.description || data.notes || "",
-      tags: Array.isArray(tags) ? tags : []
-    };
-    if (!bookmark.value.description && data.html) {
-      bookmark.value.description = stripHtml(data.html).slice(0, 300);
-    }
-    statusMessage.value = "Dados carregados. Ajuste as seções e gere o PDF.";
+    const buffer = await file.arrayBuffer();
+    const text = await extractTextFromPdf(buffer);
+    const parsed = parseProfileText(text);
+    uploadedFileName.value = file.name;
+    profile.value = parsed;
+    // pré-preenche seções com base no texto extraído
+    sections.value = [
+      { title: "Resumo do perfil", body: parsed.summary.slice(0, 800) },
+      { title: "Experiência", body: "Adicione experiências relevantes aqui." },
+      { title: "Competências", body: "Adicione competências e habilidades observadas." }
+    ];
+    statusMessage.value = "PDF processado. Revise as seções e gere o PDF.";
   } catch (err) {
-    statusMessage.value = err.message || "Falha ao buscar dados.";
+    statusMessage.value = err.message || "Falha ao ler o PDF.";
     isError.value = true;
   } finally {
     loading.value = false;
@@ -86,8 +103,8 @@ const addSection = () => {
 };
 
 const generatePdf = async () => {
-  if (!bookmark.value) {
-    statusMessage.value = "Busque um link antes de gerar o PDF.";
+  if (!profile.value) {
+    statusMessage.value = "Envie um PDF antes de gerar.";
     isError.value = true;
     return;
   }
@@ -112,8 +129,8 @@ const generatePdf = async () => {
       pdf.addImage(imgData, "PNG", 0, position, pageWidth, pdfHeight);
       heightLeft -= pdf.internal.pageSize.getHeight();
     }
-    const safeTitle = (bookmark.value.title || "linkding").replace(/[^a-z0-9-_]+/gi, "-").toLowerCase();
-    pdf.save(`fcamara-linkding-${safeTitle}.pdf`);
+    const safeTitle = (profile.value.name || "perfil").replace(/[^a-z0-9-_]+/gi, "-").toLowerCase();
+    pdf.save(`fcamara-perfil-${safeTitle}.pdf`);
     statusMessage.value = "PDF gerado com sucesso.";
   } catch (err) {
     statusMessage.value = err.message || "Erro ao gerar PDF.";
@@ -131,25 +148,22 @@ const generatePdf = async () => {
         <img src="https://www.fcamara.com.br/wp-content/uploads/2021/12/cropped-logo.png" alt="FCamara logo" />
         <div>
           <p class="eyebrow">FCamara • Ferramenta interna</p>
-          <h1>PDF de Linkding</h1>
-          <p class="muted">Cole a URL do Linkding, revise as seções e gere um PDF padronizado.</p>
+          <h1>Padronização de Perfil (PDF)</h1>
+          <p class="muted">Envie o PDF do perfil, ajuste as seções e gere um PDF com identidade FCamara.</p>
         </div>
       </div>
     </header>
 
     <main class="layout">
       <section class="card">
-        <p class="panel-title">Origem</p>
+        <p class="panel-title">Upload de PDF</p>
         <label>
-          <span>URL do Linkding (ex: https://linkding/api/bookmarks/123/)</span>
-          <input v-model="linkUrl" placeholder="https://seu-linkding/api/bookmarks/123/" />
+          <span>Selecione o PDF do perfil (ex.: export do LinkedIn)</span>
+          <input type="file" accept="application/pdf" @change="handleFile" />
         </label>
-        <label>
-          <span>Token da API (opcional)</span>
-          <input v-model="token" placeholder="Token ..." />
-        </label>
-        <button class="primary" @click="fetchBookmark" :disabled="loading">
-          {{ loading ? "Buscando..." : "Buscar dados" }}
+        <p class="mini" v-if="uploadedFileName">Arquivo: {{ uploadedFileName }}</p>
+        <button class="primary" :disabled="loading || generating" @click="generatePdf">
+          {{ generating ? "Gerando..." : "Baixar PDF" }}
         </button>
         <p v-if="statusMessage" class="status" :class="{ error: isError }">
           {{ statusMessage }}
@@ -163,33 +177,26 @@ const generatePdf = async () => {
         <button class="ghost" @click="addSection">Adicionar seção</button>
 
         <div class="actions">
-          <button class="primary" @click="generatePdf" :disabled="!bookmark || generating">
-            {{ generating ? "Gerando..." : "Baixar PDF" }}
-          </button>
           <button class="ghost" @click="resetData">Limpar</button>
         </div>
-        <p class="mini">Se o endpoint devolver JSON, usamos title/url/description/tag_names automaticamente.</p>
+        <p class="mini">O texto das seções é editável; preenchemos com o conteúdo extraído do PDF.</p>
       </section>
 
       <section class="card preview">
         <div class="preview-inner" ref="previewRef">
           <div class="preview-top">
-            <span class="badge">FCamara • Report</span>
+            <span class="badge">FCamara • Perfil</span>
             <img src="https://www.fcamara.com.br/wp-content/uploads/2021/12/cropped-logo.png" alt="logo" />
           </div>
           <div class="preview-main">
-            <p class="muted">Título</p>
-            <h2>{{ bookmark?.title || "Aguardando dados..." }}</h2>
-            <p class="muted">Link</p>
-            <p class="link">{{ bookmark?.url || "—" }}</p>
+            <p class="muted">Nome</p>
+            <h2>{{ profile?.name || "Aguardando PDF..." }}</h2>
+            <p class="muted">Headline</p>
+            <p class="link">{{ profile?.headline || "—" }}</p>
 
-            <div v-if="bookmark?.description" class="section">
+            <div v-if="profile?.summary" class="section">
               <h4>Resumo</h4>
-              <p>{{ bookmark.description }}</p>
-            </div>
-
-            <div v-if="bookmark?.tags?.length" class="taglist">
-              <span v-for="(tag, i) in bookmark.tags" :key="i" class="tag">#{{ tag }}</span>
+              <p>{{ profile.summary }}</p>
             </div>
           </div>
 

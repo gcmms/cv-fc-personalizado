@@ -11,6 +11,7 @@
   "dependencies": {
     "html2canvas": "^1.4.1",
     "jspdf": "^2.5.1",
+    "pdfjs-dist": "^4.3.136",
     "vue": "^3.4.0"
   },
   "devDependencies": {
